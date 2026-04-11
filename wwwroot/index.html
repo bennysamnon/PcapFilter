@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PcapFilter — IR Analyzer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link  rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', system-ui, sans-serif; }
+    #drop-zone.dragover { border-color: #3b82f6; background-color: #eff6ff; }
+    #map { height: 480px; z-index: 0; }
+    .sev-HIGH   { background:#fef2f2; border-color:#fca5a5; color:#991b1b; }
+    .sev-MEDIUM { background:#fffbeb; border-color:#fcd34d; color:#92400e; }
+    .sev-LOW    { background:#f0fdf4; border-color:#86efac; color:#166534; }
+    .sev-INFO   { background:#eff6ff; border-color:#93c5fd; color:#1e40af; }
+    .badge-ALERT   { background:#fef2f2; color:#991b1b; }
+    .badge-WARNING { background:#fffbeb; color:#92400e; }
+    .badge-INFO    { background:#eff6ff; color:#1e40af; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-6">
+<div class="max-w-5xl mx-auto space-y-6">
+
+  <!-- Header -->
+  <div>
+    <h1 class="text-2xl font-bold text-gray-800">PcapFilter <span class="text-sm font-normal text-gray-400 ml-2">IR Analyzer</span></h1>
+    <p class="text-sm text-gray-500 mt-1">Upload a <code class="bg-gray-100 px-1 rounded">.pcap</code> file, apply filters, and get a full incident response analysis.</p>
+  </div>
+
+  <!-- Upload card -->
+  <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+    <form id="filter-form" novalidate>
+      <div id="drop-zone" class="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center cursor-pointer transition-colors mb-5"
+           onclick="document.getElementById('file-input').click()">
+        <svg class="mx-auto mb-3 text-gray-400 w-10 h-10" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
+        <p id="drop-label" class="text-gray-500 text-sm">Drag &amp; drop your <strong>.pcap</strong> file here, or <span class="text-blue-600 underline">browse</span></p>
+        <input id="file-input" type="file" accept=".pcap,.pcapng" class="hidden" />
+      </div>
+      <div class="grid grid-cols-2 gap-4 mb-5">
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Source IP</label>
+          <input name="srcIp" type="text" placeholder="e.g. 192.168.1.1" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Destination IP</label>
+          <input name="dstIp" type="text" placeholder="e.g. 10.0.0.1" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Source Port</label>
+          <input name="srcPort" type="number" min="1" max="65535" placeholder="e.g. 443" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Destination Port</label>
+          <input name="dstPort" type="number" min="1" max="65535" placeholder="e.g. 80" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" /></div>
+      </div>
+      <div class="mb-5"><label class="block text-xs font-medium text-gray-600 mb-1">Protocol</label>
+        <select name="protocol" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
+          <option value="">Any</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option>
+        </select></div>
+      <button id="submit-btn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-semibold py-2.5 rounded-xl transition-colors text-sm">Analyze</button>
+    </form>
+    <div id="error-msg" class="hidden mt-4 text-sm text-center text-red-600 bg-red-50 rounded-lg py-2.5 px-4"></div>
+  </div>
+
+  <!-- ═══════════════════════ RESULTS ═══════════════════════ -->
+  <div id="results" class="hidden space-y-6">
+
+    <!-- 1. Capture Overview -->
+    <section>
+      <h2 class="section-title" data-help="overview">Capture Overview</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="stat-card"><div class="text-2xl font-bold text-gray-800" id="ov-total">—</div><div class="stat-label">Total Packets</div></div>
+        <div class="stat-card"><div class="text-2xl font-bold text-blue-600" id="ov-matched">—</div><div class="stat-label">Matched</div></div>
+        <div class="stat-card"><div class="text-2xl font-bold text-gray-800" id="ov-bytes">—</div><div class="stat-label">Total Data</div></div>
+        <div class="stat-card"><div class="text-2xl font-bold text-gray-800" id="ov-avg">—</div><div class="stat-label">Avg Pkt Size</div></div>
+      </div>
+    </section>
+
+    <!-- 2. Time Range -->
+    <section>
+      <h2 class="section-title" data-help="timerange">Time Range</h2>
+      <div class="card flex flex-wrap gap-8 items-center">
+        <div><div class="label">Start</div><div class="font-mono text-sm text-gray-700" id="tr-start">—</div></div>
+        <div class="text-gray-300 text-xl">→</div>
+        <div><div class="label">End</div><div class="font-mono text-sm text-gray-700" id="tr-end">—</div></div>
+        <div class="ml-auto text-right"><div class="label">Duration</div><div class="text-lg font-semibold text-gray-800" id="tr-dur">—</div></div>
+      </div>
+    </section>
+
+    <!-- 3. Suspicious Indicators -->
+    <section id="sec-indicators" class="hidden">
+      <h2 class="section-title" data-help="indicators">⚠ Suspicious Indicators</h2>
+      <div id="indicators-list" class="space-y-2"></div>
+    </section>
+
+    <!-- 4. Network Map -->
+    <section>
+      <h2 class="section-title" data-help="map">Network Map</h2>
+      <div class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+        <div id="map"></div>
+        <div class="px-4 py-3 border-t border-gray-100 flex flex-wrap gap-5 text-xs text-gray-500">
+          <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-full bg-blue-500"></span>Public IP</span>
+          <span class="flex items-center gap-1.5"><span class="inline-block w-5 h-0.5 bg-blue-400 opacity-70"></span>Flow (weight = volume)</span>
+          <span class="ml-auto italic text-gray-400">Click marker or line for details</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. Protocol Distribution -->
+    <section>
+      <h2 class="section-title" data-help="protocols">Protocol Distribution</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div class="proto-card border-blue-100">   <div class="proto-label text-blue-500">TCP</div>  <div class="proto-count" id="pd-tcp">—</div>  <div class="proto-pct" id="pd-tcp-pct"></div>  <div class="bar-bg"><div id="pd-tcp-bar"  class="bar-fill bg-blue-500"></div></div></div>
+        <div class="proto-card border-green-100">  <div class="proto-label text-green-500">UDP</div> <div class="proto-count" id="pd-udp">—</div>  <div class="proto-pct" id="pd-udp-pct"></div>  <div class="bar-bg"><div id="pd-udp-bar"  class="bar-fill bg-green-500"></div></div></div>
+        <div class="proto-card border-yellow-100"> <div class="proto-label text-yellow-500">DNS</div> <div class="proto-count" id="pd-dns">—</div>  <div class="proto-pct" id="pd-dns-pct"></div>  <div class="bar-bg"><div id="pd-dns-bar"  class="bar-fill bg-yellow-400"></div></div></div>
+        <div class="proto-card border-orange-100"> <div class="proto-label text-orange-500">HTTP</div><div class="proto-count" id="pd-http">—</div> <div class="proto-pct" id="pd-http-pct"></div> <div class="bar-bg"><div id="pd-http-bar" class="bar-fill bg-orange-500"></div></div></div>
+        <div class="proto-card border-purple-100"> <div class="proto-label text-purple-500">TLS</div> <div class="proto-count" id="pd-tls">—</div>  <div class="proto-pct" id="pd-tls-pct"></div>  <div class="bar-bg"><div id="pd-tls-bar"  class="bar-fill bg-purple-500"></div></div></div>
+      </div>
+    </section>
+
+    <!-- 6. Analyst Summary -->
+    <section>
+      <h2 class="section-title" data-help="narrative">Analyst Summary</h2>
+      <div class="bg-white rounded-xl border-l-4 border-blue-500 shadow-sm p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          <span class="text-sm font-semibold text-gray-700">Auto-generated report</span>
+        </div>
+        <pre id="narrative" class="text-sm text-gray-600 whitespace-pre-wrap font-sans leading-relaxed"></pre>
+      </div>
+    </section>
+
+    <!-- 7. DNS Analysis -->
+    <section id="sec-dns" class="hidden">
+      <h2 class="section-title" data-help="dns">DNS Analysis</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="card">
+          <h3 class="card-title mb-3">DGA Candidates <span class="text-gray-400 font-normal text-xs" id="dga-count"></span></h3>
+          <div id="dga-table"></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title mb-3">Queried Domains <span class="text-gray-400 font-normal text-xs" id="dns-count"></span></h3>
+          <div id="dns-domains" class="font-mono text-xs text-gray-600 space-y-0.5 max-h-64 overflow-y-auto"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8. HTTP Requests -->
+    <section id="sec-http" class="hidden">
+      <h2 class="section-title" data-help="http">HTTP Requests</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+        <div class="card"><h3 class="card-title mb-3">Top Hosts</h3><div id="http-hosts"></div></div>
+        <div class="card"><h3 class="card-title mb-3">Top User-Agents</h3><div id="http-uas"></div></div>
+      </div>
+      <div class="card overflow-hidden p-0">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 border-b border-gray-100">
+              <tr>
+                <th class="th">Method</th><th class="th">Host</th><th class="th">URI</th>
+                <th class="th">Source</th><th class="th">User-Agent</th>
+              </tr>
+            </thead>
+            <tbody id="http-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8b. TLS Insights -->
+    <section id="sec-tls-insights" class="hidden">
+      <h2 class="section-title" data-help="tls">🔒 TLS Insights</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+        <div class="card"><h3 class="card-title mb-3">Version Distribution</h3><div id="tls-versions"></div></div>
+        <div class="card"><h3 class="card-title mb-3">Deprecated Protocol Warnings</h3><div id="tls-old-warnings"></div></div>
+      </div>
+      <div class="card overflow-hidden p-0">
+        <div class="overflow-x-auto max-h-64">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 border-b border-gray-100 sticky top-0">
+              <tr><th class="th">Source</th><th class="th">Destination</th><th class="th text-right">Port</th>
+                  <th class="th">SNI / Domain</th><th class="th">TLS Version</th><th class="th">Flags</th></tr>
+            </thead>
+            <tbody id="tls-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8c. Credential Leaks -->
+    <section id="sec-creds" class="hidden">
+      <h2 class="section-title" data-help="creds">🔑 Credential Leaks</h2>
+      <div class="card overflow-hidden p-0">
+        <table class="w-full text-sm">
+          <thead class="bg-red-50 border-b border-red-100">
+            <tr><th class="th">Sev</th><th class="th">Type</th><th class="th">Proto</th>
+                <th class="th">Source</th><th class="th">Destination</th>
+                <th class="th">Username</th><th class="th">Detail</th></tr>
+          </thead>
+          <tbody id="creds-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 8d. Detected Apps -->
+    <section id="sec-apps" class="hidden">
+      <h2 class="section-title" data-help="apps">📱 Detected Applications</h2>
+      <div id="apps-grid" class="grid grid-cols-2 sm:grid-cols-4 gap-3"></div>
+    </section>
+
+    <!-- 9. Beaconing -->
+    <section id="sec-beacons" class="hidden">
+      <h2 class="section-title" data-help="beacons">🔴 Beaconing Detection</h2>
+      <div class="card overflow-hidden p-0">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 border-b border-gray-100">
+            <tr>
+              <th class="th">Source</th><th class="th">Destination</th>
+              <th class="th text-right">Connections</th><th class="th text-right">Avg Interval</th>
+              <th class="th text-right">Jitter</th><th class="th">Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="beacon-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 10. Port Scans -->
+    <section id="sec-scans" class="hidden">
+      <h2 class="section-title" data-help="scans">🔴 Port Scan Detection</h2>
+      <div class="card overflow-hidden p-0">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 border-b border-gray-100">
+            <tr>
+              <th class="th">Source IP</th><th class="th">Top Target</th>
+              <th class="th text-right">Unique Ports</th><th class="th">Sample Ports</th>
+            </tr>
+          </thead>
+          <tbody id="scan-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 11. Network Conversations -->
+    <section>
+      <h2 class="section-title" data-help="convs">Network Conversations <span class="text-xs font-normal text-gray-400">(top 50 by volume)</span></h2>
+      <div class="card overflow-hidden p-0">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 border-b border-gray-100">
+              <tr>
+                <th class="th">Source</th><th class="th">Destination</th><th class="th">Proto</th>
+                <th class="th text-right">Packets</th><th class="th text-right">Bytes</th>
+                <th class="th text-right">Duration</th><th class="th">Started</th>
+              </tr>
+            </thead>
+            <tbody id="conv-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 12. Top Talkers -->
+    <section>
+      <h2 class="section-title" data-help="talkers">Top Talkers</h2>
+      <div class="card overflow-hidden p-0">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 border-b border-gray-100">
+            <tr><th class="th">Source</th><th class="th">Destination</th><th class="th text-right">Packets</th><th class="th text-right">Bytes</th></tr>
+          </thead>
+          <tbody id="talkers-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 13. Top Sources / Destinations / Ports -->
+    <section>
+      <h2 class="section-title" data-help="topips">Top Sources / Destinations / Ports</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="card"><h3 class="card-title mb-3">Source IPs</h3><div id="tbl-src"></div></div>
+        <div class="card"><h3 class="card-title mb-3">Destination IPs</h3><div id="tbl-dst"></div></div>
+        <div class="card"><h3 class="card-title mb-3">Destination Ports</h3><div id="tbl-ports"></div></div>
+      </div>
+    </section>
+
+    <!-- 14. Timeline -->
+    <section id="sec-timeline" class="hidden">
+      <h2 class="section-title" data-help="timeline">Event Timeline <span class="text-xs font-normal text-gray-400">(up to 300 events)</span></h2>
+      <div class="card overflow-hidden p-0 max-h-[600px] overflow-y-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-gray-50 border-b border-gray-100 sticky top-0">
+            <tr><th class="th">Time (UTC)</th><th class="th">Sev</th><th class="th">Type</th><th class="th">Source</th><th class="th">Dest</th><th class="th">Description</th></tr>
+          </thead>
+          <tbody id="timeline-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 15. IOC Export -->
+    <section id="sec-iocs" class="hidden">
+      <h2 class="section-title" data-help="iocs">📋 IOC Export</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="card">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="card-title">Indicators of Compromise</h3>
+            <div class="flex gap-2">
+              <button onclick="exportIOC('json')" class="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 font-medium">⬇ JSON</button>
+              <button onclick="exportIOC('csv')"  class="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 font-medium">⬇ CSV</button>
+            </div>
+          </div>
+          <div id="ioc-summary"></div>
+        </div>
+        <div class="card"><h3 class="card-title mb-3">Suspicious Indicators</h3><div id="ioc-suspicious"></div></div>
+      </div>
+    </section>
+
+  </div><!-- /results -->
+</div>
+
+<!-- Help Modal -->
+<div id="help-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4" style="background:rgba(0,0,0,.5)" onclick="if(event.target===this)closeHelp()">
+  <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 relative" style="max-height:80vh;overflow-y:auto">
+    <button onclick="closeHelp()" class="absolute top-4 right-4 w-7 h-7 flex items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 text-lg font-bold leading-none">×</button>
+    <h3 id="help-modal-title" class="text-base font-bold text-gray-800 mb-4 pr-8"></h3>
+    <div id="help-modal-body" class="help-body"></div>
+  </div>
+</div>
+
+<style>
+  .section-title { font-size:.75rem; font-weight:600; color:#9ca3af; text-transform:uppercase; letter-spacing:.1em; margin-bottom:.75rem; display:flex; align-items:center; gap:.4rem; }
+  .help-btn      { flex-shrink:0; width:1.1rem; height:1.1rem; border-radius:50%; background:#e5e7eb; color:#6b7280; border:none; cursor:pointer; font-size:.6rem; font-weight:700; display:inline-flex; align-items:center; justify-content:center; text-transform:none; letter-spacing:normal; line-height:1; transition:background .15s,color .15s; padding:0; }
+  .help-btn:hover { background:#9ca3af; color:#fff; }
+  .card          { background:#fff; border-radius:.75rem; border:1px solid #f3f4f6; box-shadow:0 1px 2px rgba(0,0,0,.05); padding:1.25rem; }
+  .card-title    { font-size:.875rem; font-weight:600; color:#374151; }
+  .stat-card     { background:#fff; border-radius:.75rem; border:1px solid #f3f4f6; box-shadow:0 1px 2px rgba(0,0,0,.05); padding:1rem; text-align:center; }
+  .stat-label    { font-size:.75rem; color:#6b7280; margin-top:.25rem; }
+  .label         { font-size:.75rem; color:#9ca3af; margin-bottom:.25rem; }
+  .proto-card    { background:#fff; border-radius:.75rem; border-width:1px; border-style:solid; box-shadow:0 1px 2px rgba(0,0,0,.05); padding:1rem; text-align:center; }
+  .proto-label   { font-size:.75rem; font-weight:700; text-transform:uppercase; letter-spacing:.1em; margin-bottom:.5rem; }
+  .proto-count   { font-size:1.5rem; font-weight:700; color:#1f2937; }
+  .proto-pct     { font-size:.75rem; color:#9ca3af; margin-top:.25rem; }
+  .bar-bg        { margin-top:.5rem; height:4px; background:#f3f4f6; border-radius:9999px; overflow:hidden; }
+  .bar-fill      { height:4px; border-radius:9999px; width:0%; }
+  .th            { text-align:left; padding:.75rem 1rem; font-size:.75rem; font-weight:600; color:#6b7280; }
+  .td            { padding:.5rem 1rem; font-size:.75rem; color:#374151; }
+  /* help modal body prose */
+  .help-body p   { margin-bottom:.6rem; font-size:.875rem; line-height:1.6; color:#374151; }
+  .help-body ul  { list-style:disc; padding-left:1.25rem; margin-bottom:.6rem; }
+  .help-body li  { font-size:.875rem; line-height:1.6; color:#374151; margin-bottom:.15rem; }
+  .help-body code{ background:#f3f4f6; padding:.1rem .3rem; border-radius:.25rem; font-family:monospace; font-size:.8em; }
+  .help-body strong{ font-weight:600; color:#1f2937; }
+</style>
+
+<script>
+// ── Help modal ────────────────────────────────────────────────────────────────
+const helpText = {
+  overview: { title: "Capture Overview", body: `
+    <p><strong>What it shows:</strong> Top-level statistics for the entire PCAP file — total packets seen, how many matched your filter, total data volume, and average packet size.</p>
+    <p><strong>How it's determined:</strong> Every packet in the file is counted regardless of filters. The matched count reflects only packets that passed your src/dst IP, port, and protocol filter. Bytes include the full raw frame size (headers + payload).</p>
+    <p><strong>What to look for:</strong> A very low match rate means your filter is too narrow. A single flow accounting for most of the bytes is a potential exfiltration or bulk-transfer signal.</p>` },
+  timerange: { title: "Time Range", body: `
+    <p><strong>What it shows:</strong> The timestamp of the first and last packet in the capture, and the total duration of the session.</p>
+    <p><strong>How it's determined:</strong> Read directly from PCAP packet timestamps written by the capture tool (Wireshark, tcpdump, etc.). These are the clock times on the machine that ran the capture.</p>
+    <p><strong>What to look for:</strong> Use this to correlate the capture window with alerts or log entries. If the capture doesn't span the suspected incident window, you may be missing key traffic.</p>` },
+  indicators: { title: "Suspicious Indicators", body: `
+    <p><strong>What it shows:</strong> Automatically flagged findings ranked HIGH / MEDIUM / LOW — the most important results from every detection module in one place.</p>
+    <p><strong>How it's determined:</strong> Aggregates results from every other section:</p>
+    <ul>
+      <li><strong>HIGH</strong> — credential leaks, beaconing, port scans, DGA domains, large outbound transfers (&gt;5 MB to external IP)</li>
+      <li><strong>MEDIUM</strong> — cleartext HTTP, suspicious user-agents, deprecated TLS versions</li>
+    </ul>
+    <p><strong>What to look for:</strong> Start here. Every HIGH finding needs an explanation. Dismiss what you can account for (a known scanner, a legitimate large backup), then focus on the unexplained ones.</p>` },
+  map: { title: "Network Map", body: `
+    <p><strong>What it shows:</strong> A geographic map of all public IP addresses seen in the capture. Lines connect source↔destination pairs, with thickness proportional to traffic volume.</p>
+    <p><strong>How it's determined:</strong> Public IPs are resolved using the ip-api.com geolocation API (free, no key required, batched up to 100 IPs at a time). RFC 1918 private addresses (10.x, 172.16–31.x, 192.168.x) are excluded — they have no real-world location.</p>
+    <p><strong>What to look for:</strong> Connections to countries your organisation doesn't operate in, thick lines to unexpected destinations (potential exfiltration), or a single external IP receiving disproportionate traffic.</p>` },
+  protocols: { title: "Protocol Distribution", body: `
+    <p><strong>What it shows:</strong> How traffic is split across the main protocols — TCP, UDP, DNS, HTTP, TLS — as packet counts and percentages of total traffic.</p>
+    <p><strong>How it's determined:</strong> Transport layer (TCP/UDP) comes from the IP packet's protocol field. Application layer is determined by destination port (53→DNS, 80/8080→HTTP, 443/8443→TLS) and by inspecting the first bytes of the payload (e.g. "GET " or "POST " for HTTP, <code>0x16 0x03</code> for a TLS handshake record).</p>
+    <p><strong>What to look for:</strong> Unusually high DNS % can indicate DNS tunneling. High HTTP with low TLS may mean credentials or data are being sent in plaintext.</p>` },
+  narrative: { title: "Analyst Summary", body: `
+    <p><strong>What it shows:</strong> An auto-generated paragraph written in incident response language that summarises every finding from the capture in one place.</p>
+    <p><strong>How it's determined:</strong> Generated after all analysis modules complete. It draws from: time range, packet counts, protocol breakdown, top flow, beacon/scan alerts, DGA hits, credential leaks, TLS issues, and detected applications.</p>
+    <p><strong>What to look for:</strong> This text is designed to be copy-pasted into an incident ticket, email, or report. Review it for accuracy before use — automated analysis can miss context that a human analyst would catch.</p>` },
+  dns: { title: "DNS Analysis", body: `
+    <p><strong>What it shows:</strong> Every unique domain queried during the capture, plus a list of domains that appear algorithmically generated (DGA candidates) — a hallmark of malware C2.</p>
+    <p><strong>How it's determined:</strong> DNS packets (UDP port 53) are parsed byte-by-byte to extract the query name. DGA scoring uses three signals:</p>
+    <ul>
+      <li><strong>Shannon entropy</strong> — measures character randomness (threshold &gt; 3.5). Real words have low entropy; random strings have high.</li>
+      <li><strong>Vowel ratio</strong> — human-readable domain names contain vowels; DGA names often don't (threshold &lt; 15%).</li>
+      <li><strong>Digit density</strong> — real domain names rarely contain many numbers (threshold &gt; 35% digits).</li>
+    </ul>
+    <p><strong>What to look for:</strong> Domains like <code>xk3f9pq2.com</code> are strong C2 indicators. Also look for misspelled versions of real brands (typosquatting) in the full domain list.</p>` },
+  http: { title: "HTTP Requests", body: `
+    <p><strong>What it shows:</strong> Decoded cleartext HTTP requests — method (GET/POST/etc.), destination host, URI path, source IP, and User-Agent string. Suspicious user-agents are highlighted in red.</p>
+    <p><strong>How it's determined:</strong> Packets on ports 80, 8080, 8000, 8888, or any TCP packet whose payload starts with an HTTP verb (GET, POST, PUT, DELETE, HEAD, OPTIONS) are parsed. The first 4 KB of the payload is read to extract headers.</p>
+    <p><strong>Suspicious user-agents flagged:</strong> <code>python-requests</code>, <code>go-http-client</code>, <code>curl</code>, <code>wget</code>, <code>PowerShell</code>, <code>nmap</code>, <code>masscan</code>, <code>zgrab</code>, <code>sqlmap</code> — tools commonly used by attackers and malware. An empty User-Agent is also flagged.</p>` },
+  tls: { title: "TLS Insights", body: `
+    <p><strong>What it shows:</strong> The TLS version negotiated per connection and the SNI (Server Name Indication) — the destination domain name sent before encryption starts, revealing where HTTPS traffic is going even without decrypting it.</p>
+    <p><strong>How it's determined:</strong> TLS ClientHello packets (record type <code>0x16</code>, handshake type <code>0x01</code>) are parsed byte-by-byte. Extension <code>0x0000</code> contains the SNI hostname. Extension <code>0x002B</code> (supported_versions) reveals TLS 1.3 — without it we fall back to the legacy version field.</p>
+    <p><strong>Deprecated versions flagged:</strong> SSL 3.0 (broken 2014), TLS 1.0 and TLS 1.1 (both deprecated 2021). These lack modern cipher suites and are vulnerable to POODLE, BEAST, and other attacks. Only TLS 1.2 and 1.3 are acceptable today.</p>` },
+  creds: { title: "Credential Leaks", body: `
+    <p><strong>What it shows:</strong> Credentials found in cleartext traffic — usernames, passwords, and tokens visible to anyone on the network path.</p>
+    <p><strong>How it's determined — four detection methods:</strong></p>
+    <ul>
+      <li><strong>HTTP Basic Auth</strong> — <code>Authorization: Basic</code> header is base64-decoded to reveal <code>username:password</code></li>
+      <li><strong>Bearer tokens</strong> — <code>Authorization: Bearer</code> header transmitted over plain HTTP (not HTTPS)</li>
+      <li><strong>Form POST fields</strong> — HTTP POST body containing <code>password=</code>, <code>passwd=</code>, or <code>pwd=</code></li>
+      <li><strong>FTP</strong> — <code>USER</code> and <code>PASS</code> commands on port 21</li>
+    </ul>
+    <p><strong>Note:</strong> Actual passwords are masked with asterisks in the display. The finding proves exposure occurred — the credential should be rotated immediately regardless.</p>` },
+  apps: { title: "Detected Applications", body: `
+    <p><strong>What it shows:</strong> Applications and cloud services identified as being in use during the capture — built from network evidence, not from any software agent.</p>
+    <p><strong>How it's determined:</strong> DNS query names, HTTP Host headers, and TLS SNI values are matched against a library of ~33 known domain signatures using suffix matching. For example, any domain ending in <code>slack.com</code> or <code>slack-edge.com</code> maps to Slack. Each match increments that app's hit count.</p>
+    <p><strong>What to look for:</strong> <strong style="color:#991b1b">Anonymization tools (Tor) and data-sharing platforms (Pastebin, Mega) are highlighted in red</strong> — these are commonly used for exfiltration and C2. Unexpected collaboration or cloud storage apps may indicate shadow IT or an insider threat.</p>` },
+  beacons: { title: "Beaconing Detection", body: `
+    <p><strong>What it shows:</strong> Source→destination IP pairs that communicate at suspiciously regular intervals — a hallmark of malware checking in with a command-and-control (C2) server.</p>
+    <p><strong>How it's determined:</strong> For every IP pair with 5 or more connections, we calculate the time gaps between connections, then compute the <strong>coefficient of variation (CV = standard deviation ÷ mean)</strong>. CV below 30% means the timing is too regular to be human behaviour — it's a machine running on a timer. CV below 10% is flagged HIGH confidence.</p>
+    <p><strong>Jitter</strong> is the CV expressed as a percentage. Normal user traffic is irregular (high jitter — people click when they feel like it). Malware beacons are clock-like (near-zero jitter). A human could never accidentally produce a beacon pattern.</p>` },
+  scans: { title: "Port Scan Detection", body: `
+    <p><strong>What it shows:</strong> Source IPs that contacted an unusually high number of unique destination ports — a strong signal of network reconnaissance.</p>
+    <p><strong>How it's determined:</strong> For every TCP packet, we track how many unique destination ports each source IP reached. Any source that contacts <strong>15 or more unique ports</strong> is flagged. The most-targeted destination IP and a sample of the scanned ports are shown.</p>
+    <p><strong>What to look for:</strong> Sequential port scanning (21, 22, 23, 25…) indicates automated tools like Nmap. Random high ports suggest exploit frameworks. A scan originating from an <em>internal</em> IP often means a compromised host doing lateral movement — looking for its next target inside your network.</p>` },
+  convs: { title: "Network Conversations", body: `
+    <p><strong>What it shows:</strong> The top 50 network flows by volume, each described as a full 5-tuple: source IP:port → destination IP:port + protocol (TCP/UDP), with packet count, bytes, and duration.</p>
+    <p><strong>How it's determined:</strong> Every IP packet is mapped to its 5-tuple key. Packets accumulate into flows in a single pass through the file. After reading the full file, flows are sorted by bytes and the top 50 are returned — surfacing conversations with the most data movement.</p>
+    <p><strong>What to look for:</strong> Unexpectedly large flows (GB-scale to external IPs), long-duration connections to outside hosts (persistent C2 channels), or many small short-lived connections from one internal host to many external ports (scanner or beacon pattern).</p>` },
+  talkers: { title: "Top Talkers", body: `
+    <p><strong>What it shows:</strong> The 10 source→destination IP pairs responsible for the most traffic by byte volume.</p>
+    <p><strong>How it's determined:</strong> Every matched packet is bucketed by (source IP, destination IP) pair. After reading the full file, pairs are sorted by total bytes and the top 10 are returned. Unlike Conversations, this aggregates all ports between a pair into a single row — giving the highest-level view of who's talking to whom.</p>
+    <p><strong>What to look for:</strong> Any pair transferring significantly more bytes than the rest warrants investigation. An internal IP sending large volumes to an external IP is a classic data exfiltration pattern.</p>` },
+  topips: { title: "Top Sources / Destinations / Ports", body: `
+    <p><strong>What it shows:</strong> The 10 most active individual source IPs (by packet count), the 10 most contacted destination IPs, and the 10 most used destination ports.</p>
+    <p><strong>How it's determined:</strong> Simple packet counters, one per unique IP or port, incremented for each matched packet. Country flags are resolved from the same geolocation data used for the map.</p>
+    <p><strong>What to look for:</strong> A single internal source generating a disproportionate share of traffic may be a scanner or compromised host. An unexpected port appearing in the top 10 — for example port 4444, 1337, or 31337 — is a red flag. Unusual destination countries deserve investigation.</p>` },
+  timeline: { title: "Event Timeline", body: `
+    <p><strong>What it shows:</strong> All significant events from the capture in chronological order — DNS queries, HTTP requests, sensitive port connections, credential leaks, TLS issues, beacons, and port scans — up to 300 events.</p>
+    <p><strong>How it's determined:</strong> Each detection module emits timeline events as it processes packets. Events are tagged INFO / WARNING / ALERT. After all analysis completes, events are sorted by timestamp with ALERTs prioritised within the same second. The list is capped at 300 to keep the UI responsive.</p>
+    <p><strong>What to look for:</strong> The sequence of events tells the attack story. A DNS query to a suspicious domain, followed by a beacon to the same IP, followed by a large outbound transfer — that's a textbook malware infection timeline. Look for the pattern, not just individual events.</p>` },
+  iocs: { title: "IOC Export", body: `
+    <p><strong>What it shows:</strong> Machine-readable Indicators of Compromise extracted from the capture, ready to feed into a firewall, SIEM, EDR, or threat intelligence platform.</p>
+    <p><strong>What's included:</strong></p>
+    <ul>
+      <li><strong>External IPs</strong> — every public IP seen communicating in the capture</li>
+      <li><strong>Domains</strong> — all DNS names queried</li>
+      <li><strong>URLs</strong> — full HTTP request paths (host + URI)</li>
+      <li><strong>Suspicious IPs</strong> — IPs flagged by beaconing, port scan, or HIGH severity indicators</li>
+      <li><strong>Suspicious Domains</strong> — DGA candidates + high-entropy TLS SNI names</li>
+    </ul>
+    <p><strong>Export formats:</strong> JSON for SIEM/API ingestion. CSV for spreadsheets, Splunk lookups, or firewall blocklist imports. Both are generated entirely client-side — no data is sent anywhere.</p>` },
+};
+
+function showHelp(key) {
+  const h = helpText[key]; if (!h) return;
+  document.getElementById('help-modal-title').textContent = h.title;
+  document.getElementById('help-modal-body').innerHTML = h.body;
+  document.getElementById('help-modal').classList.remove('hidden');
+}
+function closeHelp() { document.getElementById('help-modal').classList.add('hidden'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHelp(); });
+
+// Auto-inject help buttons into every section heading that has a data-help attribute
+document.querySelectorAll('h2.section-title[data-help]').forEach(h2 => {
+  const btn = document.createElement('button');
+  btn.className = 'help-btn';
+  btn.textContent = '?';
+  btn.title = 'What is this?';
+  btn.onclick = () => showHelp(h2.dataset.help);
+  h2.appendChild(btn);
+});
+
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const dropLabel = document.getElementById('drop-label');
+const form      = document.getElementById('filter-form');
+const submitBtn = document.getElementById('submit-btn');
+const errorEl   = document.getElementById('error-msg');
+const resultsEl = document.getElementById('results');
+let selectedFile = null, leafletMap = null;
+
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) pick(fileInput.files[0]); });
+dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); if (e.dataTransfer.files[0]) pick(e.dataTransfer.files[0]); });
+
+function pick(f) {
+  selectedFile = f;
+  dropLabel.innerHTML = `<strong class="text-blue-600">${f.name}</strong> <span class="text-gray-400">(${(f.size/1024).toFixed(1)} KB)</span>`;
+}
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  errorEl.classList.add('hidden');
+  resultsEl.classList.add('hidden');
+  if (!selectedFile) { showError('Please select a .pcap file first.'); return; }
+
+  const fd = new FormData();
+  fd.append('file', selectedFile);
+  ['srcIp','dstIp','srcPort','dstPort','protocol'].forEach(n => {
+    const el = form.querySelector(`[name="${n}"]`);
+    if (el?.value) fd.append(n, el.value);
+  });
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Analyzing…';
+  try {
+    const res = await fetch('/filter', { method: 'POST', body: fd });
+    if (!res.ok) { showError('Error: ' + await res.text()); return; }
+    const data = await res.json();
+    renderAll(data);
+    resultsEl.classList.remove('hidden');
+    resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    requestAnimationFrame(() => renderMap(data.geoMap, data.summary.topTalkers));
+  } catch (err) {
+    showError('Request failed: ' + err.message);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Analyze';
+  }
+});
+
+// ── Main render ───────────────────────────────────────────────────────────────
+function renderAll(data) {
+  const { stats, summary, geoMap } = data;
+  const pd    = summary.protocolDistribution;
+  const total = stats.totalPackets;
+
+  // Overview
+  set('ov-total',   stats.totalPackets.toLocaleString());
+  set('ov-matched', stats.matchedPackets.toLocaleString());
+  set('ov-bytes',   fmtBytes(summary.totalBytes));
+  set('ov-avg',     stats.averagePacketSize + ' B');
+
+  // Time range
+  const tr = summary.timeRange;
+  set('tr-start', tr.startTime ? fmtTs(tr.startTime) : '—');
+  set('tr-end',   tr.endTime   ? fmtTs(tr.endTime)   : '—');
+  set('tr-dur',   tr.duration  ?? '—');
+
+  // Protocol cards
+  [['tcp',pd.tcp],['udp',pd.udp],['dns',pd.dns],['http',pd.http],['tls',pd.tls]].forEach(([id, cnt]) => {
+    const p = pct(cnt, total);
+    set(`pd-${id}`, cnt.toLocaleString());
+    set(`pd-${id}-pct`, p + '%');
+    document.getElementById(`pd-${id}-bar`).style.width = p + '%';
+  });
+
+  // Narrative
+  document.getElementById('narrative').textContent = summary.humanReadableSummary;
+
+  // Suspicious indicators
+  renderIndicators(summary.indicators);
+
+  // DNS
+  renderDns(summary.dnsAnalysis);
+
+  // HTTP
+  renderHttp(summary.httpAnalysis);
+
+  // TLS Insights
+  renderTlsInsights(summary.tlsInsights, summary.tlsVersions);
+
+  // Credential leaks
+  renderCredentialLeaks(summary.credentialLeaks);
+
+  // Detected apps
+  renderDetectedApps(summary.detectedApps);
+
+  // IOC export
+  renderIocs(summary.iocs);
+
+  // Beaconing
+  renderBeacons(summary.beaconCandidates);
+
+  // Port scans
+  renderScans(summary.portScans);
+
+  // Conversations
+  renderConversations(summary.conversations, geoMap);
+
+  // Top talkers
+  document.getElementById('talkers-body').innerHTML = summary.topTalkers.length === 0
+    ? nodata(4)
+    : summary.topTalkers.map((t, i) => `<tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50">
+        <td class="td font-mono">${t.sourceIp}${geoTag(geoMap, t.sourceIp)}</td>
+        <td class="td font-mono">${t.destinationIp}${geoTag(geoMap, t.destinationIp)}</td>
+        <td class="td text-right">${t.packetCount.toLocaleString()}</td>
+        <td class="td text-right">${fmtBytes(t.bytes)}</td></tr>`).join('');
+
+  // Top IPs / ports
+  renderKV('tbl-src',   stats.topSourceIps,       geoMap);
+  renderKV('tbl-dst',   stats.topDestinationIps,   geoMap);
+  renderKV('tbl-ports', stats.topDestinationPorts, null);
+
+  // Timeline
+  renderTimeline(summary.timeline);
+}
+
+// ── Section renderers ─────────────────────────────────────────────────────────
+
+function renderIndicators(indicators) {
+  if (!indicators?.length) return;
+  show('sec-indicators');
+  document.getElementById('indicators-list').innerHTML = indicators.map(i => `
+    <div class="sev-${i.severity} border rounded-lg px-4 py-3 flex items-start gap-3">
+      <span class="text-xs font-bold mt-0.5 shrink-0">${i.severity}</span>
+      <div class="flex-1 min-w-0">
+        <span class="text-xs font-semibold">${i.type.replace(/_/g,' ')}</span>
+        <span class="text-xs ml-2">${esc(i.description)}</span>
+        ${i.sourceIp ? `<span class="text-xs ml-2 opacity-60">${i.sourceIp}${i.destIp?' → '+i.destIp:''}</span>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+function renderDns(dns) {
+  if (!dns?.uniqueCount) return;
+  show('sec-dns');
+  set('dns-count', `(${dns.uniqueCount} unique)`);
+  set('dga-count', `(${dns.dgaCandidates.length} flagged)`);
+
+  document.getElementById('dga-table').innerHTML = dns.dgaCandidates.length === 0
+    ? '<p class="text-xs text-gray-400">No DGA candidates detected.</p>'
+    : `<table class="w-full text-xs"><thead><tr>
+        <th class="th pl-0">Domain</th><th class="th text-right">Entropy</th><th class="th">Reason</th>
+       </tr></thead><tbody>
+       ${dns.dgaCandidates.map((d,i) => `<tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50">
+         <td class="td pl-0 font-mono text-red-700">${esc(d.domain)}</td>
+         <td class="td text-right">${d.entropyScore}</td>
+         <td class="td text-gray-500">${esc(d.reason)}</td></tr>`).join('')}
+       </tbody></table>`;
+
+  document.getElementById('dns-domains').innerHTML =
+    dns.queriedDomains.map(d => `<div>${esc(d)}</div>`).join('');
+}
+
+function renderHttp(http) {
+  if (!http?.requests?.length) return;
+  show('sec-http');
+  renderKV('http-hosts', http.topHosts, null);
+  renderKV('http-uas',   http.topUserAgents, null, true);
+
+  document.getElementById('http-table').innerHTML = http.requests.map((r, i) => {
+    const suspicious = isBadUA(r.userAgent);
+    return `<tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50 ${suspicious ? 'bg-red-50' : ''}">
+      <td class="td font-mono font-bold">${esc(r.method)}</td>
+      <td class="td font-mono">${esc(r.host)}</td>
+      <td class="td font-mono text-gray-500 max-w-[200px] truncate" title="${esc(r.uri)}">${esc(r.uri)}</td>
+      <td class="td font-mono">${esc(r.sourceIp)}</td>
+      <td class="td max-w-[200px] truncate ${suspicious?'text-red-600 font-semibold':''}" title="${esc(r.userAgent)}">${esc(r.userAgent)||'<em class="text-gray-400">empty</em>'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderBeacons(beacons) {
+  if (!beacons?.length) return;
+  show('sec-beacons');
+  document.getElementById('beacon-table').innerHTML = beacons.map((b, i) => `
+    <tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50">
+      <td class="td font-mono">${b.sourceIp}</td>
+      <td class="td font-mono">${b.destinationIp}</td>
+      <td class="td text-right">${b.connectionCount}</td>
+      <td class="td text-right">${b.avgIntervalSeconds}s</td>
+      <td class="td text-right">${b.jitterPct}%</td>
+      <td class="td"><span class="px-2 py-0.5 rounded text-xs font-bold ${b.confidence==='HIGH'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">${b.confidence}</span></td>
+    </tr>`).join('');
+}
+
+function renderScans(scans) {
+  if (!scans?.length) return;
+  show('sec-scans');
+  document.getElementById('scan-table').innerHTML = scans.map((s, i) => `
+    <tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50">
+      <td class="td font-mono text-red-700 font-semibold">${s.sourceIp}</td>
+      <td class="td font-mono">${s.topTargetIp}</td>
+      <td class="td text-right font-bold">${s.uniquePortsContacted.toLocaleString()}</td>
+      <td class="td font-mono text-gray-500">${s.sampledPorts.join(', ')}${s.sampledPorts.length>=20?'…':''}</td>
+    </tr>`).join('');
+}
+
+function renderConversations(convs, geoMap) {
+  if (!convs?.length) { document.getElementById('conv-table').innerHTML = nodata(7); return; }
+  document.getElementById('conv-table').innerHTML = convs.map((c, i) => `
+    <tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50">
+      <td class="td font-mono">${c.sourceIp}<span class="text-gray-400">:${c.sourcePort}</span></td>
+      <td class="td font-mono">${c.destinationIp}<span class="text-gray-400">:${c.destinationPort}</span>${geoTag(geoMap, c.destinationIp)}</td>
+      <td class="td"><span class="px-1.5 py-0.5 rounded text-xs font-mono ${c.protocol==='TCP'?'bg-blue-50 text-blue-700':'bg-green-50 text-green-700'}">${c.protocol}</span></td>
+      <td class="td text-right">${c.packetCount.toLocaleString()}</td>
+      <td class="td text-right">${fmtBytes(c.bytes)}</td>
+      <td class="td text-right">${c.durationSeconds.toFixed(1)}s</td>
+      <td class="td text-gray-400">${c.startTime ? fmtTs(c.startTime) : '—'}</td>
+    </tr>`).join('');
+}
+
+function renderTimeline(events) {
+  if (!events?.length) return;
+  show('sec-timeline');
+  const sevColor = { ALERT: 'badge-ALERT', WARNING: 'badge-WARNING', INFO: 'badge-INFO' };
+  document.getElementById('timeline-table').innerHTML = events.map(e => `
+    <tr class="border-t border-gray-50 hover:bg-gray-50">
+      <td class="td font-mono whitespace-nowrap">${fmtTs(e.timestamp)}</td>
+      <td class="td"><span class="px-1.5 py-0.5 rounded text-xs font-bold ${sevColor[e.severity]??''}">${e.severity}</span></td>
+      <td class="td font-mono text-gray-500 whitespace-nowrap">${e.type}</td>
+      <td class="td font-mono">${e.sourceIp||'—'}</td>
+      <td class="td font-mono">${e.destIp||'—'}</td>
+      <td class="td text-gray-600 max-w-xs truncate" title="${esc(e.description)}">${esc(e.description)}</td>
+    </tr>`).join('');
+}
+
+// ── Map ───────────────────────────────────────────────────────────────────────
+function renderMap(geoMap, topTalkers) {
+  if (leafletMap) { leafletMap.remove(); leafletMap = null; }
+  leafletMap = L.map('map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(leafletMap);
+
+  const bounds = [];
+  for (const [ip, geo] of Object.entries(geoMap ?? {})) {
+    if (geo.isPrivate || (geo.lat === 0 && geo.lon === 0)) continue;
+    const flag = countryFlag(geo.countryCode);
+    const m = L.circleMarker([geo.lat, geo.lon], { radius:8, fillColor:'#3b82f6', color:'#1d4ed8', weight:2, opacity:1, fillOpacity:0.85 }).addTo(leafletMap);
+    m.bindPopup(`<div style="min-width:200px;font-size:13px;">
+      <b style="font-size:14px;">${flag} ${ip}</b><br>
+      <span style="color:#374151">${[geo.city,geo.country].filter(Boolean).join(', ')||'Unknown'}</span>
+      ${geo.asn?`<br><small style="color:#6b7280">${geo.asn} · ${geo.org}</small>`:''}
+    </div>`, { maxWidth:280 });
+    bounds.push([geo.lat, geo.lon]);
+  }
+
+  const maxBytes = Math.max(...(topTalkers||[]).map(t => t.bytes), 1);
+  for (const flow of (topTalkers||[])) {
+    const sg = geoMap?.[flow.sourceIp], dg = geoMap?.[flow.destinationIp];
+    if (!sg||!dg||sg.isPrivate||dg.isPrivate) continue;
+    if (!sg.lat&&!sg.lon||!dg.lat&&!dg.lon) continue;
+    const w = Math.max(1.5, (flow.bytes/maxBytes)*7);
+    L.polyline([[sg.lat,sg.lon],[dg.lat,dg.lon]], { color:'#3b82f6', weight:w, opacity:0.4+flow.bytes/maxBytes*0.4 })
+     .addTo(leafletMap)
+     .bindPopup(`<b>${flow.sourceIp} → ${flow.destinationIp}</b><br>${flow.packetCount.toLocaleString()} pkts · ${fmtBytes(flow.bytes)}`, { maxWidth:250 });
+  }
+
+  if (bounds.length > 1)       leafletMap.fitBounds(bounds, { padding:[50,50], maxZoom:10 });
+  else if (bounds.length === 1) leafletMap.setView(bounds[0], 6);
+  else                          leafletMap.setView([20,10], 2);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function showError(msg) { errorEl.textContent = msg; errorEl.classList.remove('hidden'); }
+function show(id) { document.getElementById(id)?.classList.remove('hidden'); }
+function set(id, val) { const el=document.getElementById(id); if(el) el.textContent=val; }
+function nodata(cols) { return `<tr><td colspan="${cols}" class="px-4 py-4 text-sm text-gray-400 text-center">No data.</td></tr>`; }
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtBytes(b) { if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB'; if(b>=1048576) return (b/1048576).toFixed(2)+' MB'; if(b>=1024) return (b/1024).toFixed(1)+' KB'; return b+' B'; }
+function pct(c,t) { return t===0?'0.0':(c*100/t).toFixed(1); }
+function fmtTs(iso) { try{return new Date(iso).toISOString().replace('T',' ').substring(0,19);} catch{return iso;} }
+function countryFlag(code) { if(!code||code.length!==2) return ''; return String.fromCodePoint(...[...code.toUpperCase()].map(c=>0x1F1E6+c.charCodeAt(0)-65)); }
+function geoTag(geoMap, ip) { const g=geoMap?.[ip]; if(!g||g.isPrivate) return ''; const f=countryFlag(g.countryCode); return ` <span class="text-gray-400 text-xs">${f}${g.country}</span>`; }
+function isBadUA(ua) { if(!ua) return true; const l=ua.toLowerCase(); return ['python-requests','go-http-client','curl/','wget/','powershell','nmap','masscan','zgrab','sqlmap'].some(t=>l.includes(t)); }
+function isOldTls(v) { return ['SSL 3.0','TLS 1.0','TLS 1.1'].includes(v); }
+
+function renderTlsInsights(insights, versions) {
+  if (!insights?.length) return;
+  show('sec-tls-insights');
+  // Version table
+  const vEntries = Object.entries(versions||{}).sort((a,b)=>b[1]-a[1]);
+  document.getElementById('tls-versions').innerHTML = vEntries.length===0
+    ? '<p class="text-xs text-gray-400">None</p>'
+    : `<table class="w-full text-xs"><tbody>${vEntries.map(([v,c])=>`<tr class="border-t border-gray-50">
+        <td class="py-1.5 font-mono ${isOldTls(v)?'text-red-600 font-semibold':'text-gray-700'}">${esc(v)}</td>
+        <td class="py-1.5 text-right text-gray-500">${c.toLocaleString()}</td>
+        <td class="py-1.5 pl-2">${isOldTls(v)?'<span class="text-xs text-red-600">⚠ Deprecated</span>':''}</td>
+      </tr>`).join('')}</tbody></table>`;
+  // Old version warnings
+  const old = insights.filter(t=>t.isOldVersion);
+  document.getElementById('tls-old-warnings').innerHTML = old.length===0
+    ? '<p class="text-xs text-green-600 font-medium">✓ No deprecated TLS versions detected.</p>'
+    : `<div class="space-y-1">${old.slice(0,10).map(t=>`<div class="bg-red-50 border border-red-200 rounded px-3 py-1.5 text-xs">
+        <span class="font-semibold text-red-700">${esc(t.tlsVersion)}</span>
+        <span class="text-gray-600 ml-2">${t.sourceIp} → ${t.destIp}</span>
+        ${t.sni?`<span class="text-gray-400 ml-2">(${esc(t.sni)})</span>`:''}
+      </div>`).join('')}${old.length>10?`<p class="text-xs text-gray-400 mt-1">…and ${old.length-10} more</p>`:''}</div>`;
+  // SNI table
+  document.getElementById('tls-table').innerHTML = insights.slice(0,200).map((t,i)=>`
+    <tr class="${i%2===0?'':'bg-gray-50'} border-t border-gray-50${t.isOldVersion?' bg-red-50':''}${t.isSuspiciousSni?' bg-yellow-50':''}">
+      <td class="td font-mono">${t.sourceIp}</td>
+      <td class="td font-mono">${t.destIp}</td>
+      <td class="td text-right text-gray-500">${t.destPort}</td>
+      <td class="td font-mono ${t.isSuspiciousSni?'text-orange-600 font-semibold':''}">${t.sni?esc(t.sni):'<em class="text-gray-300">no SNI</em>'}</td>
+      <td class="td"><span class="px-1.5 py-0.5 rounded text-xs font-mono ${isOldTls(t.tlsVersion)?'bg-red-100 text-red-700':'bg-purple-50 text-purple-700'}">${esc(t.tlsVersion)}</span></td>
+      <td class="td text-xs">${t.isOldVersion?'<span class="text-red-600 font-bold">OLD</span> ':''}${t.isSuspiciousSni?'<span class="text-orange-600 font-bold">DGA?</span>':''}</td>
+    </tr>`).join('');
+}
+
+function renderCredentialLeaks(leaks) {
+  if (!leaks?.length) return;
+  show('sec-creds');
+  document.getElementById('creds-table').innerHTML = leaks.map((c,i)=>`
+    <tr class="${i%2===0?'bg-red-50':'bg-red-100'} border-t border-red-100">
+      <td class="td"><span class="px-2 py-0.5 rounded text-xs font-bold ${c.severity==='HIGH'?'bg-red-200 text-red-800':'bg-yellow-100 text-yellow-800'}">${c.severity}</span></td>
+      <td class="td font-mono text-xs font-semibold">${c.type.replace(/_/g,' ')}</td>
+      <td class="td"><span class="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-700">${c.protocol}</span></td>
+      <td class="td font-mono text-xs">${c.sourceIp||'—'}</td>
+      <td class="td font-mono text-xs">${c.destIp||'—'}</td>
+      <td class="td font-mono text-xs text-blue-700 font-semibold">${esc(c.username)||'—'}</td>
+      <td class="td text-xs text-gray-700 max-w-xs truncate" title="${esc(c.detail)}">${esc(c.detail)}</td>
+    </tr>`).join('');
+}
+
+function renderDetectedApps(apps) {
+  if (!apps?.length) return;
+  show('sec-apps');
+  const catColors = {
+    'Video Conferencing':'bg-blue-50 border-blue-200 text-blue-700',
+    'Messaging':'bg-green-50 border-green-200 text-green-700',
+    'Cloud Storage':'bg-purple-50 border-purple-200 text-purple-700',
+    'Cloud Infrastructure':'bg-indigo-50 border-indigo-200 text-indigo-700',
+    'Streaming':'bg-red-50 border-red-200 text-red-700',
+    'Development':'bg-gray-100 border-gray-200 text-gray-700',
+    'Productivity':'bg-orange-50 border-orange-200 text-orange-700',
+    'Anonymization':'bg-red-100 border-red-300 text-red-800',
+    'Data Sharing':'bg-yellow-50 border-yellow-200 text-yellow-700',
+    'Cloud Services':'bg-cyan-50 border-cyan-200 text-cyan-700',
+  };
+  document.getElementById('apps-grid').innerHTML = apps.map(a => {
+    const cc = catColors[a.category]||'bg-gray-50 border-gray-200 text-gray-700';
+    const isRisky = a.category==='Anonymization'||a.category==='Data Sharing';
+    return `<div class="bg-white rounded-xl border ${isRisky?'border-red-300':'border-gray-100'} shadow-sm p-4">
+      <div class="flex items-start justify-between mb-2">
+        <div class="font-semibold text-gray-800 text-sm">${esc(a.appName)}</div>
+        <div class="text-xs text-gray-400 ml-2 shrink-0">${a.hitCount}</div>
+      </div>
+      <span class="text-xs px-2 py-0.5 rounded-full border ${cc}">${esc(a.category)}</span>
+      <div class="mt-2 text-xs text-gray-500 font-mono truncate" title="${esc(a.domains.join(', '))}">${esc(a.domains.slice(0,2).join(', '))}${a.domains.length>2?'…':''}</div>
+    </div>`;
+  }).join('');
+}
+
+let _iocData = null;
+function renderIocs(iocs) {
+  if (!iocs) return;
+  const total=(iocs.ipAddresses?.length||0)+(iocs.domains?.length||0)+(iocs.urls?.length||0);
+  if (!total && !iocs.suspiciousIps?.length && !iocs.suspiciousDomains?.length) return;
+  _iocData = iocs;
+  show('sec-iocs');
+  document.getElementById('ioc-summary').innerHTML=`<div class="space-y-1.5 text-sm">
+    <div class="flex justify-between py-1 border-b border-gray-50"><span class="text-gray-600">External IPs</span><span class="font-semibold">${iocs.ipAddresses?.length||0}</span></div>
+    <div class="flex justify-between py-1 border-b border-gray-50"><span class="text-gray-600">Domains</span><span class="font-semibold">${iocs.domains?.length||0}</span></div>
+    <div class="flex justify-between py-1"><span class="text-gray-600">HTTP URLs</span><span class="font-semibold">${iocs.urls?.length||0}</span></div>
+  </div>`;
+  const susIps  = iocs.suspiciousIps  ||[];
+  const susDoms = iocs.suspiciousDomains||[];
+  document.getElementById('ioc-suspicious').innerHTML=
+    (!susIps.length&&!susDoms.length)
+      ? '<p class="text-xs text-gray-400">No suspicious indicators.</p>'
+      : `${susIps.length?`<div class="mb-3"><div class="text-xs font-semibold text-red-600 mb-1">Suspicious IPs (${susIps.length})</div>
+          <div class="font-mono text-xs text-gray-700 space-y-0.5">${susIps.slice(0,10).map(ip=>`<div>${esc(ip)}</div>`).join('')}${susIps.length>10?`<div class="text-gray-400">…+${susIps.length-10} more</div>`:''}</div></div>`:''}
+        ${susDoms.length?`<div><div class="text-xs font-semibold text-orange-600 mb-1">Suspicious Domains (${susDoms.length})</div>
+          <div class="font-mono text-xs text-gray-700 space-y-0.5">${susDoms.slice(0,10).map(d=>`<div>${esc(d)}</div>`).join('')}${susDoms.length>10?`<div class="text-gray-400">…+${susDoms.length-10} more</div>`:''}</div></div>`:''}`;
+}
+
+function exportIOC(fmt) {
+  if (!_iocData) return;
+  let content, mime, ext;
+  if (fmt==='json') {
+    content=JSON.stringify(_iocData,null,2); mime='application/json'; ext='json';
+  } else {
+    const lines=['type,value'];
+    (_iocData.ipAddresses||[]).forEach(v=>lines.push(`ip,${v}`));
+    (_iocData.domains||[]).forEach(v=>lines.push(`domain,${v}`));
+    (_iocData.urls||[]).forEach(v=>lines.push(`url,${v.replace(/,/g,'%2C')}`));
+    (_iocData.suspiciousIps||[]).forEach(v=>lines.push(`suspicious_ip,${v}`));
+    (_iocData.suspiciousDomains||[]).forEach(v=>lines.push(`suspicious_domain,${v}`));
+    content=lines.join('\n'); mime='text/csv'; ext='csv';
+  }
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([content],{type:mime}));
+  a.download=`iocs.${ext}`; a.click(); URL.revokeObjectURL(a.href);
+}
+
+function renderKV(id, obj, geoMap, truncate=false) {
+  const entries = Object.entries(obj||{});
+  document.getElementById(id).innerHTML = entries.length===0
+    ? '<p class="text-sm text-gray-400">None</p>'
+    : `<table class="w-full text-sm"><tbody>${entries.map(([k,v])=>{
+        const geo = geoMap?.[k]; const flag = geo&&!geo.isPrivate?countryFlag(geo.countryCode)+' ':'';
+        const label = truncate&&k.length>40 ? `<span title="${esc(k)}" class="cursor-help">${esc(k.substring(0,40))}…</span>` : esc(k);
+        return `<tr class="border-t border-gray-50"><td class="py-1 font-mono text-xs text-gray-700">${flag}${label}</td><td class="py-1 text-right text-xs text-gray-500">${v.toLocaleString()}</td></tr>`;
+      }).join('')}</tbody></table>`;
+}
+</script>
+</body>
+</html>
