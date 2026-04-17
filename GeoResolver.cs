@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
+using MaxMind.GeoIP2;
+using MaxMind.GeoIP2.Exceptions;
 
 namespace PcapFilter;
 
@@ -20,19 +22,84 @@ public static class GeoResolver
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
-    public static async Task<Dictionary<string, GeoInfo>> ResolveAsync(IEnumerable<string> ips)
+    // Look for .mmdb files next to the executable or in a GeoIP/ subdirectory
+    private static readonly string? CityDbPath = FindDb("GeoLite2-City.mmdb");
+    private static readonly string? AsnDbPath  = FindDb("GeoLite2-ASN.mmdb");
+
+    public static bool HasLocalDb => CityDbPath is not null;
+
+    private static string? FindDb(string filename)
+    {
+        var bases = new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() };
+        var candidates = bases.SelectMany(b => new[]
+        {
+            Path.Combine(b, filename),
+            Path.Combine(b, "GeoIP", filename),
+        });
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    public static async Task<Dictionary<string, GeoInfo>> ResolveAsync(IEnumerable<string> ips, bool useLocalDb = true)
     {
         var result    = new Dictionary<string, GeoInfo>();
         var all       = ips.Distinct().ToList();
         var publicIps = all.Where(ip => !IsPrivate(ip)).ToList();
 
-        // Private IPs — no geo lookup, mark as internal
+        // Private IPs — no geo lookup needed
         foreach (var ip in all.Where(IsPrivate))
             result[ip] = new GeoInfo { Ip = ip, IsPrivate = true, Country = "Private Network" };
 
         if (publicIps.Count == 0) return result;
 
-        // ip-api.com batch endpoint: free, no key, up to 100 IPs per request
+        if (useLocalDb && CityDbPath is not null)
+            ResolveOffline(publicIps, result);
+        else
+            await ResolveOnlineAsync(publicIps, result);
+
+        return result;
+    }
+
+    private static void ResolveOffline(List<string> publicIps, Dictionary<string, GeoInfo> result)
+    {
+        using var cityReader = new DatabaseReader(CityDbPath!);
+        using var asnReader  = AsnDbPath is not null ? new DatabaseReader(AsnDbPath) : null;
+
+        foreach (var ip in publicIps)
+        {
+            try
+            {
+                var city = cityReader.City(ip);
+                var geo  = new GeoInfo
+                {
+                    Ip          = ip,
+                    Country     = city.Country.Name     ?? "",
+                    CountryCode = city.Country.IsoCode  ?? "",
+                    City        = city.City.Name        ?? "",
+                    Lat         = city.Location.Latitude  ?? 0,
+                    Lon         = city.Location.Longitude ?? 0,
+                };
+
+                if (asnReader is not null)
+                {
+                    try
+                    {
+                        var asn = asnReader.Asn(ip);
+                        geo.Asn = $"AS{asn.AutonomousSystemNumber}";
+                        geo.Org = asn.AutonomousSystemOrganization ?? "";
+                    }
+                    catch (AddressNotFoundException) { }
+                }
+
+                result[ip] = geo;
+            }
+            catch (AddressNotFoundException) { }
+            catch { }
+        }
+    }
+
+    // ip-api.com batch endpoint: free, no key, up to 100 IPs per request
+    private static async Task ResolveOnlineAsync(List<string> publicIps, Dictionary<string, GeoInfo> result)
+    {
         foreach (var batch in publicIps.Chunk(100))
         {
             try
@@ -65,8 +132,6 @@ public static class GeoResolver
                 // geo lookup is best-effort — skip silently if unreachable
             }
         }
-
-        return result;
     }
 
     public static bool IsPrivate(string ipStr)

@@ -4,13 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PcapFilter — IR Analyzer</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link  rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/lib/tailwind.js"></script>
+  <link  rel="stylesheet" href="/lib/leaflet.css" />
+  <script src="/lib/leaflet.js"></script>
   <style>
     body { font-family: 'Segoe UI', system-ui, sans-serif; }
     #drop-zone.dragover { border-color: #3b82f6; background-color: #eff6ff; }
-    #map { height: 480px; z-index: 0; }
+    #map { height: 480px; z-index: 0; background: #bfdbfe; }
     .sev-HIGH   { background:#fef2f2; border-color:#fca5a5; color:#991b1b; }
     .sev-MEDIUM { background:#fffbeb; border-color:#fcd34d; color:#92400e; }
     .sev-LOW    { background:#f0fdf4; border-color:#86efac; color:#166534; }
@@ -54,6 +54,10 @@
         <select name="protocol" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
           <option value="">Any</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option>
         </select></div>
+      <div id="connection-status" class="flex items-center gap-2 mb-4">
+        <span id="status-dot" class="w-2 h-2 rounded-full bg-gray-300 flex-shrink-0"></span>
+        <span id="status-text" class="text-xs text-gray-400">Checking connection…</span>
+      </div>
       <button id="submit-btn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-semibold py-2.5 rounded-xl transition-colors text-sm">Analyze</button>
     </form>
     <div id="error-msg" class="hidden mt-4 text-sm text-center text-red-600 bg-red-50 rounded-lg py-2.5 px-4"></div>
@@ -393,9 +397,16 @@ const helpText = {
     <p><strong>How it's determined:</strong> Packets on ports 80, 8080, 8000, 8888, or any TCP packet whose payload starts with an HTTP verb (GET, POST, PUT, DELETE, HEAD, OPTIONS) are parsed. The first 4 KB of the payload is read to extract headers.</p>
     <p><strong>Suspicious user-agents flagged:</strong> <code>python-requests</code>, <code>go-http-client</code>, <code>curl</code>, <code>wget</code>, <code>PowerShell</code>, <code>nmap</code>, <code>masscan</code>, <code>zgrab</code>, <code>sqlmap</code> — tools commonly used by attackers and malware. An empty User-Agent is also flagged.</p>` },
   tls: { title: "TLS Insights", body: `
-    <p><strong>What it shows:</strong> The TLS version negotiated per connection and the SNI (Server Name Indication) — the destination domain name sent before encryption starts, revealing where HTTPS traffic is going even without decrypting it.</p>
-    <p><strong>How it's determined:</strong> TLS ClientHello packets (record type <code>0x16</code>, handshake type <code>0x01</code>) are parsed byte-by-byte. Extension <code>0x0000</code> contains the SNI hostname. Extension <code>0x002B</code> (supported_versions) reveals TLS 1.3 — without it we fall back to the legacy version field.</p>
-    <p><strong>Deprecated versions flagged:</strong> SSL 3.0 (broken 2014), TLS 1.0 and TLS 1.1 (both deprecated 2021). These lack modern cipher suites and are vulnerable to POODLE, BEAST, and other attacks. Only TLS 1.2 and 1.3 are acceptable today.</p>` },
+    <p><strong>What it shows:</strong> The TLS version negotiated per connection and the SNI — the destination domain name sent before encryption starts, revealing where HTTPS traffic is going even without decrypting it.</p>
+    <p><strong>What is SNI?</strong> SNI (Server Name Indication) is the hostname the client sends inside the TLS handshake, <em>before</em> the connection is encrypted. Even in HTTPS traffic you cannot read, the SNI tells you exactly which domain was being contacted. Think of it as the address written on the outside of a sealed envelope.</p>
+    <p><strong>How it's determined:</strong> TLS ClientHello packets (record type <code>0x16</code>, handshake type <code>0x01</code>) are parsed byte-by-byte. Extension <code>0x0000</code> contains the SNI hostname. Extension <code>0x002B</code> (supported_versions) reveals the true negotiated version — without it we fall back to the legacy version field.</p>
+    <p><strong>What does the DGA? flag mean?</strong> SNI hostnames that look algorithmically generated are flagged as potential C2 domains. We score each hostname using three signals:</p>
+    <ul>
+      <li><strong>Shannon Entropy &gt; 3.5</strong> — measures character randomness. Real domain names score low; random strings score high.</li>
+      <li><strong>Vowel ratio &lt; 15%</strong> — human-readable names contain vowels. DGA names like <code>xk3f9pq2</code> often have none.</li>
+      <li><strong>Digit density &gt; 35%</strong> — legitimate domain names rarely contain many numbers.</li>
+    </ul>
+    <p><strong>What does the OLD flag mean?</strong> SSL 3.0 (broken 2014), TLS 1.0 and TLS 1.1 (deprecated 2021) are flagged. These lack modern cipher suites and are vulnerable to POODLE, BEAST, and similar attacks. Only TLS 1.2 and 1.3 are acceptable today.</p>` },
   creds: { title: "Credential Leaks", body: `
     <p><strong>What it shows:</strong> Credentials found in cleartext traffic — usernames, passwords, and tokens visible to anyone on the network path.</p>
     <p><strong>How it's determined — four detection methods:</strong></p>
@@ -470,10 +481,28 @@ const dropZone  = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const dropLabel = document.getElementById('drop-label');
 const form      = document.getElementById('filter-form');
-const submitBtn = document.getElementById('submit-btn');
-const errorEl   = document.getElementById('error-msg');
-const resultsEl = document.getElementById('results');
-let selectedFile = null, leafletMap = null;
+const submitBtn  = document.getElementById('submit-btn');
+const errorEl    = document.getElementById('error-msg');
+const resultsEl  = document.getElementById('results');
+const statusDot  = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+let selectedFile = null, leafletMap = null, _online = false;
+
+function setStatus(online) {
+  _online = online;
+  if (online) {
+    statusDot.className  = 'w-2 h-2 rounded-full bg-green-500 flex-shrink-0';
+    statusText.className = 'text-xs text-green-700';
+    statusText.textContent = 'Online — using live geolocation and map tiles';
+  } else {
+    statusDot.className  = 'w-2 h-2 rounded-full bg-amber-400 flex-shrink-0';
+    statusText.className = 'text-xs text-amber-700';
+    statusText.textContent = 'Offline — using local GeoLite2 database and map';
+  }
+}
+
+// Check connectivity on load
+isOnline().then(setStatus);
 
 fileInput.addEventListener('change', () => { if (fileInput.files[0]) pick(fileInput.files[0]); });
 dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -497,6 +526,7 @@ form.addEventListener('submit', async e => {
     const el = form.querySelector(`[name="${n}"]`);
     if (el?.value) fd.append(n, el.value);
   });
+  fd.append('geoLocalDb', _online ? 'false' : 'true');
 
   submitBtn.disabled = true;
   submitBtn.textContent = 'Analyzing…';
@@ -507,7 +537,7 @@ form.addEventListener('submit', async e => {
     renderAll(data);
     resultsEl.classList.remove('hidden');
     resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    requestAnimationFrame(() => renderMap(data.geoMap, data.summary.topTalkers));
+    requestAnimationFrame(() => { renderMap(data.geoMap, data.summary.topTalkers); });
   } catch (err) {
     showError('Request failed: ' + err.message);
   } finally {
@@ -703,13 +733,39 @@ function renderTimeline(events) {
     </tr>`).join('');
 }
 
-// ── Map ───────────────────────────────────────────────────────────────────────
-function renderMap(geoMap, topTalkers) {
+// ── Connectivity & map base layer ─────────────────────────────────────────────
+let _worldGeo = null;
+async function loadWorldGeo() {
+  if (_worldGeo) return _worldGeo;
+  try { _worldGeo = await fetch('/lib/countries.geojson').then(r => r.json()); } catch {}
+  return _worldGeo;
+}
+
+async function isOnline() {
+  try {
+    await fetch('https://tile.openstreetmap.org/0/0/0.png', { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(2000) });
+    return true;
+  } catch { return false; }
+}
+
+async function renderMap(geoMap, topTalkers) {
   if (leafletMap) { leafletMap.remove(); leafletMap = null; }
-  leafletMap = L.map('map');
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-  }).addTo(leafletMap);
+  leafletMap = L.map('map').setView([20, 10], 2);
+
+  if (await isOnline()) {
+    // Online — full OSM tile layer
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(leafletMap);
+  } else {
+    // Offline — local vector world map
+    const world = await loadWorldGeo();
+    if (world) {
+      L.geoJson(world, {
+        style: { color: '#94a3b8', weight: 0.5, fillColor: '#e2e8f0', fillOpacity: 1 }
+      }).addTo(leafletMap);
+    }
+  }
 
   const bounds = [];
   for (const [ip, geo] of Object.entries(geoMap ?? {})) {
@@ -735,9 +791,8 @@ function renderMap(geoMap, topTalkers) {
      .bindPopup(`<b>${flow.sourceIp} → ${flow.destinationIp}</b><br>${flow.packetCount.toLocaleString()} pkts · ${fmtBytes(flow.bytes)}`, { maxWidth:250 });
   }
 
-  if (bounds.length > 1)       leafletMap.fitBounds(bounds, { padding:[50,50], maxZoom:10 });
+  if (bounds.length > 1)        leafletMap.fitBounds(bounds, { padding:[50,50], maxZoom:10 });
   else if (bounds.length === 1) leafletMap.setView(bounds[0], 6);
-  else                          leafletMap.setView([20,10], 2);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

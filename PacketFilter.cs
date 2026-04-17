@@ -928,7 +928,7 @@ public static class PacketFilter
                     for (int vi = 0; vi < listLen - 1 && pos + 1 + vi + 1 < payload.Length; vi += 2)
                     {
                         ushort ver = (ushort)((payload[pos + 1 + vi] << 8) | payload[pos + 2 + vi]);
-                        if (ver > maxVer) maxVer = ver;
+                        if (!IsGreaseValue(ver) && ver > maxVer) maxVer = ver;
                     }
                     if (maxVer > 0) negotiatedVer = ParseTlsVersion(maxVer);
                 }
@@ -950,6 +950,10 @@ public static class PacketFilter
         }
         catch { return null; } // malformed packet — skip silently
     }
+
+    // GREASE values (RFC 8701): 0x0A0A, 0x1A1A, 0x2A2A … 0xFAFA — both bytes equal, low nibble = 0xA
+    private static bool IsGreaseValue(ushort ver) =>
+        (ver & 0x0F) == 0x0A && (ver >> 8) == (ver & 0xFF);
 
     private static string ParseTlsVersion(ushort ver) => ver switch
     {

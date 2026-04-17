@@ -10,7 +10,9 @@ if (args.Length == 0)
     var app = builder.Build();
 
     app.UseDefaultFiles();
-    app.UseStaticFiles();
+    var mimeTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+    mimeTypes.Mappings[".geojson"] = "application/geo+json";
+    app.UseStaticFiles(new Microsoft.AspNetCore.Builder.StaticFileOptions { ContentTypeProvider = mimeTypes });
 
     // POST /filter  — upload pcap + options, returns JSON statistics
     app.MapPost("/filter", [Microsoft.AspNetCore.Mvc.RequestSizeLimit(500 * 1024 * 1024)] async (HttpRequest request) =>
@@ -40,6 +42,8 @@ if (args.Length == 0)
                 Protocol        = NullIfEmpty(form["protocol"]),
             };
 
+            bool useLocalDb = form["geoLocalDb"] != "false";
+
             var result = PacketFilter.Analyze(inputPath, options);
 
             // Geo-resolve all unique IPs seen in flows and top-IP tables
@@ -49,7 +53,7 @@ if (args.Length == 0)
                 .Concat(result.Stats.TopDestinationIps.Keys)
                 .Distinct();
 
-            result.GeoMap = await GeoResolver.ResolveAsync(allIps);
+            result.GeoMap = await GeoResolver.ResolveAsync(allIps, useLocalDb);
 
             return Results.Json(result);
         }
